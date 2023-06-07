@@ -1,0 +1,31 @@
+# permissions for end users to edit oauth2proxies.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: oauth2proxy-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: oauth2-proxy-operator
+    app.kubernetes.io/part-of: oauth2-proxy-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: oauth2proxy-editor-role
+rules:
+- apiGroups:
+  - oauth2proxy.oauth2proxy-operator.dexter0195.com
+  resources:
+  - oauth2proxies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - oauth2proxy.oauth2proxy-operator.dexter0195.com
+  resources:
+  - oauth2proxies/status
+  verbs:
+  - get
