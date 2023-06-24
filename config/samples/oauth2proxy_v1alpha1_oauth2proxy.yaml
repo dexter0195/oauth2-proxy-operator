@@ -1,0 +1,9 @@
+apiVersion: oauth2proxy.oauth2proxy-operator.dexter0195.com/v1alpha1
+kind: OAuth2Proxy
+metadata:
+  name: oauth2proxy-sample
+spec:
+  # TODO(user): edit the following value to ensure the number
+  # of Pods/Instances your Operand must have on cluster
+  size: 1
+
