@@ -20,6 +20,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type OAuth2ProxyExistingSecret struct {
+	// Size is the number of replicas
+	// +kubebuilder:validation:Required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	SecretRef map[string]string `json:"secretRef,omitempty"`
+}
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
@@ -37,6 +44,11 @@ type OAuth2ProxySpec struct {
 	// +kubebuilder:validation:Required
 	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Config string `json:"config,omitempty"`
+
+	// ClientSecretFromExistingSecret is the name of the secret that contains the client secret
+	// +kubebuilder:validation:Required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	EnvFromExistingSecret OAuth2ProxyExistingSecret `json:"envFromExistingSecret,omitempty"`
 }
 
 // OAuth2ProxyStatus defines the observed state of OAuth2Proxy

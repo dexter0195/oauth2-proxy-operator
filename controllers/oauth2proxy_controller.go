@@ -191,9 +191,35 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
+	// check if configmap exists, if not create a new one
+	foundCM := &corev1.ConfigMap{}
+	err = r.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, foundCM)
+	if err != nil && apierrors.IsNotFound(err) {
+		// Define a new configmap
+		cm, err := r.configMapForOAuth2Proxy(oauth2proxy)
+		if err != nil {
+			log.Error(err, "Failed to define new ConfigMap resource for OAuth2Proxy")
+
+			// The following implementation will update the status
+			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeAvailableOAuth2Proxy,
+				Status: metav1.ConditionFalse, Reason: "Reconciling",
+				Message: fmt.Sprintf("Failed to create ConfigMap for the custom resource (%s): (%s)", oauth2proxy.Name, err)})
+
+			if err := r.Status().Update(ctx, oauth2proxy); err != nil {
+				log.Error(err, "Failed to update OAuth2Proxy status")
+				return ctrl.Result{}, err
+			}
+		}
+		log.Info("Creating a new ConfigMap", "ConfigMap.Namespace", cm.Namespace, "ConfigMap.Name", cm.Name)
+		if err := r.Create(ctx, cm); err != nil {
+			log.Error(err, "Failed to create new ConfigMap", "ConfigMap.Namespace", cm.Namespace, "ConfigMap.Name", cm.Name)
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Check if the deployment already exists, if not create a new one
-	found := &appsv1.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, found)
+	foundDep := &appsv1.Deployment{}
+	err = r.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, foundDep)
 	if err != nil && apierrors.IsNotFound(err) {
 		// Define a new deployment
 		dep, err := r.deploymentForOAuth2Proxy(oauth2proxy)
@@ -236,11 +262,11 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Therefore, the following code will ensure the Deployment size is the same as defined
 	// via the Size spec of the Custom Resource which we are reconciling.
 	size := oauth2proxy.Spec.Size
-	if *found.Spec.Replicas != size {
-		found.Spec.Replicas = &size
-		if err = r.Update(ctx, found); err != nil {
+	if *foundDep.Spec.Replicas != size {
+		foundDep.Spec.Replicas = &size
+		if err = r.Update(ctx, foundDep); err != nil {
 			log.Error(err, "Failed to update Deployment",
-				"Deployment.Namespace", found.Namespace, "Deployment.Name", found.Name)
+				"Deployment.Namespace", foundDep.Namespace, "Deployment.Name", foundDep.Name)
 
 			// Re-fetch the oauth2proxy Custom Resource before update the status
 			// so that we have the latest state of the resource on the cluster and we will avoid
@@ -317,7 +343,10 @@ func (r *OAuth2ProxyReconciler) configMapForOAuth2Proxy(
 			Namespace: oauth2proxy.Namespace,
 			Labels:    ls,
 		},
-		Data: map[string]string{"config": oauth2proxy.Spec.Config},
+		// add the data from the oauth2proxy spec field config to the configmap data
+		Data: map[string]string{
+			"config.cfg": oauth2proxy.Spec.Config,
+		},
 	}
 	// Set the ownerRef for the ConfigMap
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
@@ -355,34 +384,6 @@ func (r *OAuth2ProxyReconciler) deploymentForOAuth2Proxy(
 					Labels: ls,
 				},
 				Spec: corev1.PodSpec{
-					// TODO(user): Uncomment the following code to configure the nodeAffinity expression
-					// according to the platforms which are supported by your solution. It is considered
-					// best practice to support multiple architectures. build your manager image using the
-					// makefile target docker-buildx. Also, you can use docker manifest inspect <image>
-					// to check what are the platforms supported.
-					// More info: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#node-affinity
-					//Affinity: &corev1.Affinity{
-					//	NodeAffinity: &corev1.NodeAffinity{
-					//		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-					//			NodeSelectorTerms: []corev1.NodeSelectorTerm{
-					//				{
-					//					MatchExpressions: []corev1.NodeSelectorRequirement{
-					//						{
-					//							Key:      "kubernetes.io/arch",
-					//							Operator: "In",
-					//							Values:   []string{"amd64", "arm64", "ppc64le", "s390x"},
-					//						},
-					//						{
-					//							Key:      "kubernetes.io/os",
-					//							Operator: "In",
-					//							Values:   []string{"linux"},
-					//						},
-					//					},
-					//				},
-					//			},
-					//		},
-					//	},
-					//},
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &[]bool{true}[0],
 						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19
@@ -408,14 +409,36 @@ func (r *OAuth2ProxyReconciler) deploymentForOAuth2Proxy(
 								},
 							},
 						},
-						Command: []string{"/bin/oauth2-proxy", fmt.Sprintf("--provider=%s", oauth2proxy.Spec.Provider)},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: oauth2proxy.Name,
-						VolumeSource: {
-							Configmap:
+						//Command: []string{"/bin/sleep", fmt.Sprintf("1000")},
+						Command: []string{"/bin/oauth2-proxy", fmt.Sprintf("--config=/etc/oauth2-proxy.cfg")},
+						EnvFrom: []corev1.EnvFromSource{
+							{
+								SecretRef: &corev1.SecretEnvSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: oauth2proxy.Spec.EnvFromExistingSecret.SecretRef["name"]},
+								},
+							},
+						},
+						// Add the volumeMount to the container
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "config",
+								MountPath: "/etc/oauth2-proxy.cfg",
+								SubPath:   "config.cfg",
+								ReadOnly:  true,
+							},
 						},
 					}},
+					// add a volume of the config map to the container
+					Volumes: []corev1.Volume{
+						{
+							Name: "config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: oauth2proxy.Name},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
