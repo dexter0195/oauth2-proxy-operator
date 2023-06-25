@@ -35,29 +35,24 @@ spec:
           spec:
             description: OAuth2ProxySpec defines the desired state of OAuth2Proxy
             properties:
-              googleAdminEmail:
-                description: GoogleAdminEmail is the google admin to impersonate for
-                  api calls
+              config:
+                description: Config is the configuration file to pass to oAuth2Proxy
                 type: string
-              googleGroup:
-                description: GoogleGroups restrict logins to members of this google
-                  groups.
-                items:
-                  type: string
-                type: array
-              googleServiceAccountJson:
-                description: GoogleServiceAccountJson is the path to the service account
-                  json credentials
-                type: string
-              provider:
-                description: Provider is the OAuth provider
-                type: string
+              envFromExistingSecret:
+                description: ClientSecretFromExistingSecret is the name of the secret
+                  that contains the client secret
+                properties:
+                  secretRef:
+                    additionalProperties:
+                      type: string
+                    description: Size is the number of replicas
+                    type: object
+                type: object
               size:
                 description: Size is the number of replicas
                 format: int32
                 type: integer
             required:
-            - provider
             - size
             type: object
           status:
