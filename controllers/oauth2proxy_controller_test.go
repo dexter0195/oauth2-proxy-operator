@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	oauth2proxyv1alpha1 "github.com/dexter0195/oauth2-proxy-operator/api/v1alpha1"
+	oauth2proxyreconcile "github.com/dexter0195/oauth2-proxy-operator/pkg/proxy/reconcile"
 )
 
 var _ = Describe("OAuth2Proxy controller", func() {
@@ -118,7 +119,7 @@ var _ = Describe("OAuth2Proxy controller", func() {
 			Eventually(func() error {
 				if oauth2proxy.Status.Conditions != nil && len(oauth2proxy.Status.Conditions) != 0 {
 					latestStatusCondition := oauth2proxy.Status.Conditions[len(oauth2proxy.Status.Conditions)-1]
-					expectedLatestStatusCondition := metav1.Condition{Type: typeAvailableOAuth2Proxy,
+					expectedLatestStatusCondition := metav1.Condition{Type: oauth2proxyreconcile.TypeAvailableOAuth2Proxy,
 						Status: metav1.ConditionTrue, Reason: "Reconciling",
 						Message: fmt.Sprintf("Deployment for custom resource (%s) with %d replicas created successfully", oauth2proxy.Name, oauth2proxy.Spec.Size)}
 					if latestStatusCondition != expectedLatestStatusCondition {
