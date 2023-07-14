@@ -2,9 +2,11 @@ package reconcile
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"reflect"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -68,13 +70,50 @@ func ConfigMap(ctx context.Context, params Params) error {
 
 		if configMapChanged(desiredCM, currentCM) {
 			params.Recorder.Event(updated, "Normal", "ConfigUpdate ", fmt.Sprintf("OpenTelemetry Config changed - %s/%s", desiredCM.Namespace, desiredCM.Name))
+			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: TypeAvailableOAuth2Proxy,
+				Status: metav1.ConditionFalse, Reason: "Reconciling",
+				Message: fmt.Sprintf("Updating Configmap and Deployment after change for the custom resource (%s)", oauth2proxy.Name)})
+
+			if err := params.Client.Get(ctx, params.Request.NamespacedName, oauth2proxy); err != nil {
+				params.Log.Error(err, "Failed to re-fetch oauth2proxy")
+				return err
+			}
 			if err := params.Client.Patch(ctx, updated, patch); err != nil {
 				return fmt.Errorf("failed to apply changes: %w", err)
 			}
 		}
 
 		params.Log.V(2).Info("applied", "configmap.name", desiredCM.Name, "configmap.namespace", desiredCM.Namespace)
+		if err := updateDeployment(ctx, params, updated); err != nil {
+			return fmt.Errorf("failed to restart deployment: %w", err)
+		}
 	}
+	return nil
+}
+
+func updateDeployment(ctx context.Context, params Params, cm *corev1.ConfigMap) error {
+
+	dep := &appsv1.Deployment{}
+	oauth2proxy := params.Instance
+	// need to check the flow here, if the configmap was not changed then we should not set the status to reconciling
+	if err := params.Client.Status().Update(ctx, oauth2proxy); err != nil {
+		params.Log.Error(err, "Failed to update OAuth2Proxy status")
+		return err
+	}
+	err := params.Client.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, dep)
+	if err != nil || apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to get deployment while updating the configmap: %w", err)
+	}
+	// hash the cm object in base64 and set it as the annotation of the dep
+	sha := fmt.Sprintf("%x", sha256.Sum256([]byte(cm.Data["config.cfg"])))
+	if dep.Spec.Template.ObjectMeta.Annotations == nil {
+		dep.Spec.Template.ObjectMeta.Annotations = map[string]string{}
+	}
+	dep.Spec.Template.ObjectMeta.Annotations["configmap-hash"] = sha
+	if err := params.Client.Update(ctx, dep); err != nil {
+		return fmt.Errorf("failed to update deployment while updating the configmap: %w", err)
+	}
+
 	return nil
 }
 
