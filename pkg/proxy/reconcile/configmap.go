@@ -81,12 +81,13 @@ func ConfigMap(ctx context.Context, params Params) error {
 			if err := params.Client.Patch(ctx, updated, patch); err != nil {
 				return fmt.Errorf("failed to apply changes: %w", err)
 			}
+			// Update the Deployment to deploy new pods with the new configmap
+			params.Log.V(2).Info("applied", "configmap.name", desiredCM.Name, "configmap.namespace", desiredCM.Namespace)
+			if err := updateDeployment(ctx, params, updated); err != nil {
+				return fmt.Errorf("failed to restart deployment: %w", err)
+			}
 		}
 
-		params.Log.V(2).Info("applied", "configmap.name", desiredCM.Name, "configmap.namespace", desiredCM.Namespace)
-		if err := updateDeployment(ctx, params, updated); err != nil {
-			return fmt.Errorf("failed to restart deployment: %w", err)
-		}
 	}
 	return nil
 }

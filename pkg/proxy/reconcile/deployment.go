@@ -11,39 +11,37 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/dexter0195/oauth2-proxy-operator/pkg/proxy"
 )
 
 func Deployment(ctx context.Context, params Params) (ctrl.Result, error) {
-	foundDep := &appsv1.Deployment{}
-	oauth2proxy := params.Instance
 	log := params.Log
-	err := params.Client.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, foundDep)
-	if err != nil && apierrors.IsNotFound(err) {
-		// Define a new deployment
-		dep, err := deploymentForOAuth2Proxy(params)
-		if err != nil {
-			log.Error(err, "Failed to define new Deployment resource for OAuth2Proxy")
-
-			// The following implementation will update the status
-			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: TypeAvailableOAuth2Proxy,
-				Status: metav1.ConditionFalse, Reason: "Reconciling",
-				Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", oauth2proxy.Name, err)})
-
-			if err := params.Client.Status().Update(ctx, oauth2proxy); err != nil {
-				log.Error(err, "Failed to update OAuth2Proxy status")
-				return ctrl.Result{}, err
-			}
-
+	oauth2proxy := params.Instance
+	desiredDep, err := deploymentForOAuth2Proxy(params)
+	if err != nil {
+		log.Error(err, "Failed to define new Deployment resource for OAuth2Proxy")
+		// The following implementation will update the status
+		meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: TypeAvailableOAuth2Proxy,
+			Status: metav1.ConditionFalse, Reason: "Reconciling",
+			Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", oauth2proxy.Name, err)})
+		if err := params.Client.Status().Update(ctx, oauth2proxy); err != nil {
+			log.Error(err, "Failed to update OAuth2Proxy status")
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{}, err
+	}
 
+	currentDep := &appsv1.Deployment{}
+	err = params.Client.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, currentDep)
+	if err != nil && apierrors.IsNotFound(err) {
+		// Define a new deployment
 		log.Info("Creating a new Deployment",
-			"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-		if err = params.Client.Create(ctx, dep); err != nil {
+			"Deployment.Namespace", desiredDep.Namespace, "Deployment.Name", desiredDep.Name)
+		if err = params.Client.Create(ctx, desiredDep); err != nil {
 			log.Error(err, "Failed to create new Deployment",
-				"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
+				"Deployment.Namespace", desiredDep.Namespace, "Deployment.Name", desiredDep.Name)
 			return ctrl.Result{}, err
 		}
 
@@ -55,66 +53,31 @@ func Deployment(ctx context.Context, params Params) (ctrl.Result, error) {
 		log.Error(err, "Failed to get Deployment")
 		// Let's return the error for the reconciliation be re-trigged again
 		return ctrl.Result{}, err
-	}
-
-	// Ensure the deployment size is the same as the spec
-	if err = checkReplicas(ctx, params, foundDep); err != nil {
-		return ctrl.Result{}, err
 	} else {
-		return ctrl.Result{Requeue: true}, nil
-	}
-}
-
-func checkReplicas(ctx context.Context, params Params, deployment *appsv1.Deployment) error {
-
-	// The CRD API is defining that the OAuth2Proxy type, have a OAuth2ProxySpec.Size field
-	// to set the quantity of Deployment instances is the desired state on the cluster.
-	// Therefore, the following code will ensure the Deployment size is the same as defined
-	// via the Size spec of the Custom Resource which we are reconciling.
-	oauth2proxy := params.Instance
-	log := params.Log
-	size := oauth2proxy.Spec.Size
-	if *deployment.Spec.Replicas != size {
-		deployment.Spec.Replicas = &size
-		if err := params.Client.Update(ctx, deployment); err != nil {
-			log.Error(err, "Failed to update Deployment",
-				"Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
-
-			// Re-fetch the oauth2proxy Custom Resource before update the status
-			// so that we have the latest state of the resource on the cluster and we will avoid
-			// raise the issue "the object has been modified, please apply
-			// your changes to the latest version and try again" which would re-trigger the reconciliation
-			if err := params.Client.Get(ctx, params.Request.NamespacedName, oauth2proxy); err != nil {
-				log.Error(err, "Failed to re-fetch oauth2proxy")
-				return err
-			}
-
-			// The following implementation will update the status
-			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: TypeAvailableOAuth2Proxy,
-				Status: metav1.ConditionFalse, Reason: "Resizing",
-				Message: fmt.Sprintf("Failed to update the size for the custom resource (%s): (%s)", oauth2proxy.Name, err)})
-
-			if err := params.Client.Status().Update(ctx, oauth2proxy); err != nil {
-				log.Error(err, "Failed to update OAuth2Proxy status")
-				return err
-			}
-
-			return err
+		// Deployment already exists, check that was is deployed is what we expect.
+		updated := currentDep.DeepCopy()
+		if updated.Annotations == nil {
+			updated.Annotations = map[string]string{}
 		}
+		if updated.Labels == nil {
+			updated.Labels = map[string]string{}
+		}
+		updated.Spec = desiredDep.Spec
+		updated.ObjectMeta.OwnerReferences = desiredDep.ObjectMeta.OwnerReferences
 
-		return nil
+		for k, v := range desiredDep.ObjectMeta.Annotations {
+			updated.ObjectMeta.Annotations[k] = v
+		}
+		for k, v := range desiredDep.ObjectMeta.Labels {
+			updated.ObjectMeta.Labels[k] = v
+		}
+		patch := client.MergeFrom(currentDep)
+		if err := params.Client.Patch(ctx, updated, patch); err != nil {
+			log.Error(err, "Failed to patch Deployment")
+			return ctrl.Result{}, err
+		}
 	}
-
-	// The following implementation will update the status
-	meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: TypeAvailableOAuth2Proxy,
-		Status: metav1.ConditionTrue, Reason: "Reconciling",
-		Message: fmt.Sprintf("Deployment for custom resource (%s) with %d replicas created successfully", oauth2proxy.Name, size)})
-
-	if err := params.Client.Status().Update(ctx, oauth2proxy); err != nil {
-		log.Error(err, "Failed to update OAuth2Proxy status")
-		return err
-	}
-	return nil
+	return ctrl.Result{}, nil
 }
 
 // deploymentForOAuth2Proxy returns a OAuth2Proxy Deployment object
