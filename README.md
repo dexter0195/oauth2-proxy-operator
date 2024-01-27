@@ -37,9 +37,13 @@ Contributions are always welcome if you see potential in this tool :)
 
 ## How to run
 
-
 ```bash
-export OAUTH2PROXY_IMAGE="quay.io/oauth2-proxy/oauth2-proxy:latest" \
+make generate
+make manifests
+make install
+make build
+export OAUTH2PROXY_IMAGE="quay.io/oauth2-proxy/oauth2-proxy:latest"
+make run
 ```
 
 ## Future developments
