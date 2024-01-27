@@ -19,9 +19,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -29,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,16 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	oauth2proxyv1alpha1 "github.com/dexter0195/oauth2-proxy-operator/api/v1alpha1"
-)
-
-const oauth2proxyFinalizer = "oauth2proxy.oauth2proxy-operator.dexter0195.com/finalizer"
-
-// Definitions to manage status conditions
-const (
-	// typeAvailableOAuth2Proxy represents the status of the Deployment reconciliation
-	typeAvailableOAuth2Proxy = "Available"
-	// typeDegradedOAuth2Proxy represents the status used when the custom resource is deleted and the finalizer operations are must to occur.
-	typeDegradedOAuth2Proxy = "Degraded"
+	"github.com/dexter0195/oauth2-proxy-operator/pkg/proxy/reconcile"
 )
 
 // OAuth2ProxyReconciler reconciles a OAuth2Proxy object
@@ -101,7 +88,7 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Let's just set the status as Unknown when no status are available
 	if oauth2proxy.Status.Conditions == nil || len(oauth2proxy.Status.Conditions) == 0 {
-		meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeAvailableOAuth2Proxy, Status: metav1.ConditionUnknown, Reason: "Reconciling", Message: "Starting reconciliation"})
+		meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: reconcile.TypeAvailableOAuth2Proxy, Status: metav1.ConditionUnknown, Reason: "Reconciling", Message: "Starting reconciliation"})
 		if err = r.Status().Update(ctx, oauth2proxy); err != nil {
 			log.Error(err, "Failed to update OAuth2Proxy status")
 			return ctrl.Result{}, err
@@ -121,9 +108,9 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Let's add a finalizer. Then, we can define some operations which should
 	// occurs before the custom resource to be deleted.
 	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers
-	if !controllerutil.ContainsFinalizer(oauth2proxy, oauth2proxyFinalizer) {
+	if !controllerutil.ContainsFinalizer(oauth2proxy, reconcile.Oauth2proxyFinalizer) {
 		log.Info("Adding Finalizer for OAuth2Proxy")
-		if ok := controllerutil.AddFinalizer(oauth2proxy, oauth2proxyFinalizer); !ok {
+		if ok := controllerutil.AddFinalizer(oauth2proxy, reconcile.Oauth2proxyFinalizer); !ok {
 			log.Error(err, "Failed to add finalizer into the custom resource")
 			return ctrl.Result{Requeue: true}, nil
 		}
@@ -138,11 +125,11 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// indicated by the deletion timestamp being set.
 	isOAuth2ProxyMarkedToBeDeleted := oauth2proxy.GetDeletionTimestamp() != nil
 	if isOAuth2ProxyMarkedToBeDeleted {
-		if controllerutil.ContainsFinalizer(oauth2proxy, oauth2proxyFinalizer) {
+		if controllerutil.ContainsFinalizer(oauth2proxy, reconcile.Oauth2proxyFinalizer) {
 			log.Info("Performing Finalizer Operations for OAuth2Proxy before delete CR")
 
 			// Let's add here an status "Downgrade" to define that this resource begin its process to be terminated.
-			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeDegradedOAuth2Proxy,
+			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: reconcile.TypeDegradedOAuth2Proxy,
 				Status: metav1.ConditionUnknown, Reason: "Finalizing",
 				Message: fmt.Sprintf("Performing finalizer operations for the custom resource: %s ", oauth2proxy.Name)})
 
@@ -168,7 +155,7 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 				return ctrl.Result{}, err
 			}
 
-			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeDegradedOAuth2Proxy,
+			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: reconcile.TypeDegradedOAuth2Proxy,
 				Status: metav1.ConditionTrue, Reason: "Finalizing",
 				Message: fmt.Sprintf("Finalizer operations for custom resource %s name were successfully accomplished", oauth2proxy.Name)})
 
@@ -178,7 +165,7 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 
 			log.Info("Removing Finalizer for OAuth2Proxy after successfully perform the operations")
-			if ok := controllerutil.RemoveFinalizer(oauth2proxy, oauth2proxyFinalizer); !ok {
+			if ok := controllerutil.RemoveFinalizer(oauth2proxy, reconcile.Oauth2proxyFinalizer); !ok {
 				log.Error(err, "Failed to remove finalizer for OAuth2Proxy")
 				return ctrl.Result{Requeue: true}, nil
 			}
@@ -191,119 +178,23 @@ func (r *OAuth2ProxyReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	// check if configmap exists, if not create a new one
-	foundCM := &corev1.ConfigMap{}
-	err = r.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, foundCM)
-	if err != nil && apierrors.IsNotFound(err) {
-		// Define a new configmap
-		cm, err := r.configMapForOAuth2Proxy(oauth2proxy)
-		if err != nil {
-			log.Error(err, "Failed to define new ConfigMap resource for OAuth2Proxy")
-
-			// The following implementation will update the status
-			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeAvailableOAuth2Proxy,
-				Status: metav1.ConditionFalse, Reason: "Reconciling",
-				Message: fmt.Sprintf("Failed to create ConfigMap for the custom resource (%s): (%s)", oauth2proxy.Name, err)})
-
-			if err := r.Status().Update(ctx, oauth2proxy); err != nil {
-				log.Error(err, "Failed to update OAuth2Proxy status")
-				return ctrl.Result{}, err
-			}
-		}
-		log.Info("Creating a new ConfigMap", "ConfigMap.Namespace", cm.Namespace, "ConfigMap.Name", cm.Name)
-		if err := r.Create(ctx, cm); err != nil {
-			log.Error(err, "Failed to create new ConfigMap", "ConfigMap.Namespace", cm.Namespace, "ConfigMap.Name", cm.Name)
-			return ctrl.Result{}, err
-		}
+	// do config map creation / update
+	params := reconcile.Params{
+		Client:   r.Client,
+		Recorder: r.Recorder,
+		Scheme:   r.Scheme,
+		Request:  req,
+		Log:      log,
+		Instance: oauth2proxy,
 	}
-
-	// Check if the deployment already exists, if not create a new one
-	foundDep := &appsv1.Deployment{}
-	err = r.Get(ctx, types.NamespacedName{Name: oauth2proxy.Name, Namespace: oauth2proxy.Namespace}, foundDep)
-	if err != nil && apierrors.IsNotFound(err) {
-		// Define a new deployment
-		dep, err := r.deploymentForOAuth2Proxy(oauth2proxy)
-		if err != nil {
-			log.Error(err, "Failed to define new Deployment resource for OAuth2Proxy")
-
-			// The following implementation will update the status
-			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeAvailableOAuth2Proxy,
-				Status: metav1.ConditionFalse, Reason: "Reconciling",
-				Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", oauth2proxy.Name, err)})
-
-			if err := r.Status().Update(ctx, oauth2proxy); err != nil {
-				log.Error(err, "Failed to update OAuth2Proxy status")
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{}, err
-		}
-
-		log.Info("Creating a new Deployment",
-			"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-		if err = r.Create(ctx, dep); err != nil {
-			log.Error(err, "Failed to create new Deployment",
-				"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-			return ctrl.Result{}, err
-		}
-
-		// Deployment created successfully
-		// We will requeue the reconciliation so that we can ensure the state
-		// and move forward for the next operations
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
-	} else if err != nil {
-		log.Error(err, "Failed to get Deployment")
-		// Let's return the error for the reconciliation be re-trigged again
+	if err := reconcile.ConfigMap(ctx, params); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// The CRD API is defining that the OAuth2Proxy type, have a OAuth2ProxySpec.Size field
-	// to set the quantity of Deployment instances is the desired state on the cluster.
-	// Therefore, the following code will ensure the Deployment size is the same as defined
-	// via the Size spec of the Custom Resource which we are reconciling.
-	size := oauth2proxy.Spec.Size
-	if *foundDep.Spec.Replicas != size {
-		foundDep.Spec.Replicas = &size
-		if err = r.Update(ctx, foundDep); err != nil {
-			log.Error(err, "Failed to update Deployment",
-				"Deployment.Namespace", foundDep.Namespace, "Deployment.Name", foundDep.Name)
-
-			// Re-fetch the oauth2proxy Custom Resource before update the status
-			// so that we have the latest state of the resource on the cluster and we will avoid
-			// raise the issue "the object has been modified, please apply
-			// your changes to the latest version and try again" which would re-trigger the reconciliation
-			if err := r.Get(ctx, req.NamespacedName, oauth2proxy); err != nil {
-				log.Error(err, "Failed to re-fetch oauth2proxy")
-				return ctrl.Result{}, err
-			}
-
-			// The following implementation will update the status
-			meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeAvailableOAuth2Proxy,
-				Status: metav1.ConditionFalse, Reason: "Resizing",
-				Message: fmt.Sprintf("Failed to update the size for the custom resource (%s): (%s)", oauth2proxy.Name, err)})
-
-			if err := r.Status().Update(ctx, oauth2proxy); err != nil {
-				log.Error(err, "Failed to update OAuth2Proxy status")
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{}, err
-		}
-
-		// Now, that we update the size we want to requeue the reconciliation
-		// so that we can ensure that we have the latest state of the resource before
-		// update. Also, it will help ensure the desired state on the cluster
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	// The following implementation will update the status
-	meta.SetStatusCondition(&oauth2proxy.Status.Conditions, metav1.Condition{Type: typeAvailableOAuth2Proxy,
-		Status: metav1.ConditionTrue, Reason: "Reconciling",
-		Message: fmt.Sprintf("Deployment for custom resource (%s) with %d replicas created successfully", oauth2proxy.Name, size)})
-
-	if err := r.Status().Update(ctx, oauth2proxy); err != nil {
-		log.Error(err, "Failed to update OAuth2Proxy status")
+	if res, err := reconcile.Deployment(ctx, params); err != nil {
 		return ctrl.Result{}, err
+	} else if res.Requeue {
+		return res, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -327,156 +218,6 @@ func (r *OAuth2ProxyReconciler) doFinalizerOperationsForOAuth2Proxy(cr *oauth2pr
 		fmt.Sprintf("Custom Resource %s is being deleted from the namespace %s",
 			cr.Name,
 			cr.Namespace))
-}
-
-func (r *OAuth2ProxyReconciler) configMapForOAuth2Proxy(
-	oauth2proxy *oauth2proxyv1alpha1.OAuth2Proxy) (*corev1.ConfigMap, error) {
-	ls := labelsForOAuth2Proxy(oauth2proxy.Name)
-
-	cm := &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ConfigMap",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      oauth2proxy.Name,
-			Namespace: oauth2proxy.Namespace,
-			Labels:    ls,
-		},
-		// add the data from the oauth2proxy spec field config to the configmap data
-		Data: map[string]string{
-			"config.cfg": oauth2proxy.Spec.Config,
-		},
-	}
-	// Set the ownerRef for the ConfigMap
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
-	if err := ctrl.SetControllerReference(oauth2proxy, cm, r.Scheme); err != nil {
-		return nil, err
-	}
-
-	return cm, nil
-}
-
-// deploymentForOAuth2Proxy returns a OAuth2Proxy Deployment object
-func (r *OAuth2ProxyReconciler) deploymentForOAuth2Proxy(
-	oauth2proxy *oauth2proxyv1alpha1.OAuth2Proxy) (*appsv1.Deployment, error) {
-	ls := labelsForOAuth2Proxy(oauth2proxy.Name)
-	replicas := oauth2proxy.Spec.Size
-
-	// Get the Operand image
-	image, err := imageForOAuth2Proxy()
-	if err != nil {
-		return nil, err
-	}
-
-	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      oauth2proxy.Name,
-			Namespace: oauth2proxy.Namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: ls,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: ls,
-				},
-				Spec: corev1.PodSpec{
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &[]bool{true}[0],
-						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19
-						// If you are looking for to produce solutions to be supported
-						// on lower versions you must remove this option.
-						SeccompProfile: &corev1.SeccompProfile{
-							Type: corev1.SeccompProfileTypeRuntimeDefault,
-						},
-					},
-					Containers: []corev1.Container{{
-						Image:           image,
-						Name:            "oauth2proxy",
-						ImagePullPolicy: corev1.PullIfNotPresent,
-						// Ensure restrictive context for the container
-						// More info: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
-						SecurityContext: &corev1.SecurityContext{
-							RunAsNonRoot:             &[]bool{true}[0],
-							RunAsUser:                &[]int64{1001}[0],
-							AllowPrivilegeEscalation: &[]bool{false}[0],
-							Capabilities: &corev1.Capabilities{
-								Drop: []corev1.Capability{
-									"ALL",
-								},
-							},
-						},
-						//Command: []string{"/bin/sleep", fmt.Sprintf("1000")},
-						Command: []string{"/bin/oauth2-proxy", fmt.Sprintf("--config=/etc/oauth2-proxy.cfg")},
-						EnvFrom: []corev1.EnvFromSource{
-							{
-								SecretRef: &corev1.SecretEnvSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: oauth2proxy.Spec.EnvFromExistingSecret.SecretRef["name"]},
-								},
-							},
-						},
-						// Add the volumeMount to the container
-						VolumeMounts: []corev1.VolumeMount{
-							{
-								Name:      "config",
-								MountPath: "/etc/oauth2-proxy.cfg",
-								SubPath:   "config.cfg",
-								ReadOnly:  true,
-							},
-						},
-					}},
-					// add a volume of the config map to the container
-					Volumes: []corev1.Volume{
-						{
-							Name: "config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: oauth2proxy.Name},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Set the ownerRef for the Deployment
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/
-	if err := ctrl.SetControllerReference(oauth2proxy, dep, r.Scheme); err != nil {
-		return nil, err
-	}
-	return dep, nil
-}
-
-// labelsForOAuth2Proxy returns the labels for selecting the resources
-// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
-func labelsForOAuth2Proxy(name string) map[string]string {
-	var imageTag string
-	image, err := imageForOAuth2Proxy()
-	if err == nil {
-		imageTag = strings.Split(image, ":")[1]
-	}
-	return map[string]string{"app.kubernetes.io/name": "OAuth2Proxy",
-		"app.kubernetes.io/instance":   name,
-		"app.kubernetes.io/version":    imageTag,
-		"app.kubernetes.io/part-of":    "oauth2-proxy-operator",
-		"app.kubernetes.io/created-by": "controller-manager",
-	}
-}
-
-// imageForOAuth2Proxy gets the Operand image which is managed by this controller
-// from the OAUTH2PROXY_IMAGE environment variable defined in the config/manager/manager.yaml
-func imageForOAuth2Proxy() (string, error) {
-	var imageEnvVar = "OAUTH2PROXY_IMAGE"
-	image, found := os.LookupEnv(imageEnvVar)
-	if !found {
-		return "", fmt.Errorf("Unable to find %s environment variable with the image", imageEnvVar)
-	}
-	return image, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
